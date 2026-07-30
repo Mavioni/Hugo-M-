@@ -4,11 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hugo"
-version = "0.1.0"
+version = "0.2.0"
 description = "Post-training ternary (1.58-bit) weight quantization for Hugging Face models"
 readme = "README.md"
 license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.10"
+authors = [
+    { name = "Mavioni", email = "massi@example.com" },
+]
+keywords = [
+    "ternary",
+    "quantization",
+    "bitnet",
+    "1.58-bit",
+    "llm",
+    "pytorch",
+    "huggingface",
+    "weight-compression",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
 dependencies = [
     "torch>=2.1",
     "transformers>=4.40",
@@ -16,8 +44,15 @@ dependencies = [
     "huggingface_hub>=0.20",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Mavioni/Hugo-M-"
+Documentation = "https://github.com/Mavioni/Hugo-M-#readme"
+Repository = "https://github.com/Mavioni/Hugo-M-"
+Issues = "https://github.com/Mavioni/Hugo-M-/issues"
+Changelog = "https://github.com/Mavioni/Hugo-M-/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff==0.16.0", "datasets>=2.14"]
+dev = ["pytest>=7", "pytest-cov>=4", "ruff==0.6.9", "mypy>=1.0", "datasets>=2.14"]
 # QAT training needs a dataset loader; PTQ-only users don't.
 train = ["datasets>=2.14"]
 
@@ -38,3 +73,15 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 110
 src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+exclude = ["tests/"]

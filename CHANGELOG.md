@@ -2,7 +2,35 @@
 
 All notable changes to Hugo are documented here.
 
-## [Unreleased]
+## [0.2.0] - Professional redesign
+
+### Added
+- **README rewritten** with multi-level explanations (beginner → expert),
+  Mermaid diagrams, compute requirement tables, benchmarks, and professional
+  project structure.
+- **`docs/compute-requirements.md`**: detailed GPU memory breakdown, training
+  time estimates, activation math, gradient checkpointing guidance, and
+  multi-GPU strategies for QAT training.
+- **GitHub community files**: issue templates (bug report, feature request,
+  question), pull request template, `config.yml` with discussion link.
+- **`.github/dependabot.yml`**: automated pip and GitHub Actions dependency
+  updates (weekly).
+- **`Makefile`**: `make test`, `make lint`, `make format`, `make typecheck`,
+  `make clean`, `make build`, `make all` (same as CI).
+- **`py.typed`** marker so type checkers recognize Hugo as a typed package.
+- **`pyproject.toml`** improvements: full classifiers, project URLs,
+  `[tool.mypy]` and `[tool.ruff.lint]` config, `pytest-cov` dev dependency.
+
+### Changed
+- **`__init__.py`** now exports the full public API: all quantize, QAT,
+  streaming, and packed-loading functions are importable directly from `hugo`.
+- **Version bumped** to 0.2.0 to reflect the expanded documentation and
+  community infrastructure.
+- **`ruff` version** pinned to 0.6.9 in `[dev]` deps to match
+  `.pre-commit-config.yaml`.
+- **`CHANGELOG.md`** format aligned with [Keep a Changelog](https://keepachangelog.com/).
+
+## [0.1.0] - Initial re-tune tooling
 
 ### Fixed
 Four correctness bugs surfaced by an automated review on PR #1, each verified
@@ -48,7 +76,7 @@ against the code before fixing and each now covered by a regression test:
 - `hugo.train_qat` (`hugo-train-qat`): QAT fine-tuning CLI with gradient
   accumulation, configurable granularity/skip patterns, and run metadata
   written alongside the checkpoint. Validated end-to-end on a small proxy
-  model (loss 20.31 -> 19.49 over 20 steps; all layers bake out with <= 3
+  model (loss 20.31 → 19.49 over 20 steps; all layers bake out with ≤3
   distinct values per row and the checkpoint reloads cleanly).
 - `hugo.push_to_hub` (`hugo-push`): publish a checkpoint to the Hugging Face
   Hub, with an auto-generated model card that distinguishes QAT from PTQ
@@ -64,38 +92,17 @@ against the code before fixing and each now covered by a regression test:
   PTQ in a table, replacing the previous PTQ-only framing.
 - `datasets` added as a `[train]` extra (QAT-only dependency; PTQ users
   don't need it).
-
-## [0.1.0] - Initial re-tune tooling
-
-### Added
-- `hugo.quantize`: BitNet b1.58-style absmean ternary quantization math
-  (`tensor`/`channel`/`group` granularity), 2-bit pack/unpack, per-layer
-  error stats.
-- `hugo.ternarize`: loads a model via `transformers`, quantizes it in
-  memory, saves a drop-in HF checkpoint plus an optional 2-bit-packed
-  sidecar. Suited to models that fit comfortably in RAM/disk.
-- `hugo.stream_ternarize` / `hugo.streaming`: disk-bounded quantization
-  that processes one safetensors shard at a time (download, quantize,
-  pack, delete, repeat), so checkpoints far larger than local disk can
-  still be re-tuned. Resumable via a per-shard `manifest.json`. Never
-  instantiates the model class, so it works on architectures the
-  installed `transformers` doesn't support yet.
-- `hugo.reconstruct`: rebuilds a normal, loadable checkpoint from a
-  `stream_ternarize` output, on a machine with enough disk for the full
-  model.
-- `hugo.load_packed`: reconstruct an individual layer's weight from a
-  packed sidecar without a full checkpoint rebuild.
 - Repository packaging (`pyproject.toml`, `src/` layout, console scripts),
   CI (`.github/workflows/tests.yml`), and community-health files, modeled
   on the structure of several widely-used open-source repositories
   (`psf/requests`, `pallets/flask`, `tiangolo/fastapi`, `Textualize/rich`,
   `huggingface/transformers`, `ggerganov/llama.cpp`, `microsoft/BitNet`).
 
-### Known limitations
+### Known limitations (0.1.0)
 - This is post-training quantization (PTQ), not quantization-aware
   training. Expect a real accuracy hit versus a model trained ternary from
   scratch; error grows as scale granularity gets coarser
   (`channel` < `group` < `tensor`).
-- No inference speedup without a ternary-aware kernel -- the drop-in
+- No inference speedup without a ternary-aware kernel — the drop-in
   checkpoint from `hugo.ternarize` stores ternary values as regular
   fp16/bf16 numbers.
