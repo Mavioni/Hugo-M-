@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""CLI: ternary-quantize (BitNet b1.58-style) a Hugging Face causal LM.
+
+Example:
+    python3 -m hugo.ternarize \\
+        --model huihui-ai/Huihui-Qwen3.6-27B-abliterated \\
+        --output ./out/qwen3.6-27b-ternary \\
+        --granularity channel \\
+        --pack
+
+Notes:
+  - This is post-training quantization applied to weights that were never
+    trained to be ternary. Expect a real quality hit; it will not match a
+    model trained from scratch with ternary-aware training.
+  - The saved model in --output is a normal HF checkpoint (same architecture,
+    same dtype) whose Linear weights just happen to take only 3 distinct
+    values per scale group -- it loads with plain `from_pretrained` and gets
+    no speedup without a ternary-aware kernel (e.g. bitnet.cpp). Pass --pack
+    to additionally emit a genuinely 2-bit-per-weight packed sidecar that
+    demonstrates the real storage compression.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import sys
+
+import torch
+
+from hugo.quantize import (
+    LayerQuantStats,
+    pack_ternary_2bit,
+    quantize_linear_modules,
+)
+
+DEFAULT_SKIP = ["lm_head", "embed_tokens", "norm"]
+
+DTYPE_MAP = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--model", required=True, help="HF repo id or local path of the source model")
+    p.add_argument("--output", required=True, help="Directory to write the quantized model + tokenizer to")
+    p.add_argument("--revision", default=None, help="Optional HF revision/branch/commit for --model")
+    p.add_argument("--granularity", choices=["tensor", "channel", "group"], default="channel",
+                   help="Scale granularity for absmean quantization (default: channel, i.e. per output row)")
+    p.add_argument("--group-size", type=int, default=None,
+                   help="Group size along the input dimension, required when --granularity=group")
+    p.add_argument("--skip", default=",".join(DEFAULT_SKIP),
+                   help=f"Comma-separated substrings of module names to leave unquantized "
+                        f"(default: {','.join(DEFAULT_SKIP)})")
+    p.add_argument("--dtype", choices=list(DTYPE_MAP), default="bfloat16",
+                   help="Compute/storage dtype to load the model in (default: bfloat16)")
+    p.add_argument("--pack", action="store_true",
+                   help="Also write a 2-bit-packed ternary sidecar under <output>/ternary_packed/")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Only load, quantize in memory, and report stats -- do not save anything")
+    p.add_argument("--trust-remote-code", action="store_true")
+    p.add_argument("--max-shard-size", default="4GB")
+    return p.parse_args(argv)
+
+
+def human_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.2f}{unit}"
+        n /= 1024
+    return f"{n:.2f}PB"
+
+
+def summarize(stats: list[LayerQuantStats]) -> None:
+    if not stats:
+        print("No nn.Linear layers were quantized (check --skip patterns).")
+        return
+
+    total_params = sum(s.shape[0] * s.shape[1] for s in stats)
+    avg_err = sum(s.relative_l2_error for s in stats) / len(stats)
+    avg_zero = sum(s.zero_fraction for s in stats) / len(stats)
+    worst = max(stats, key=lambda s: s.relative_l2_error)
+
+    print(f"Quantized {len(stats)} Linear layers, {total_params:,} weight elements")
+    print(f"  avg relative L2 error : {avg_err:.4f}")
+    print(f"  avg zero fraction     : {avg_zero:.4f}  (share of weights rounded to 0)")
+    print(f"  worst layer           : {worst.name} (rel. L2 error {worst.relative_l2_error:.4f}, shape {worst.shape})")
+
+    fp16_bytes = total_params * 2
+    packed_bytes = sum((s.shape[0] * s.shape[1] + 3) // 4 for s in stats)
+    scale_bytes_channel = sum(s.shape[0] * 4 for s in stats)  # float32 scale per output row
+    print(f"  fp16 size of quantized layers      : {human_bytes(fp16_bytes)}")
+    print(f"  2-bit packed + per-channel scales  : {human_bytes(packed_bytes + scale_bytes_channel)}"
+          f"  (~{fp16_bytes / max(packed_bytes + scale_bytes_channel, 1):.1f}x smaller)")
+
+
+def build_packed_sidecar(model, quantized: dict, granularity: str, group_size: int | None):
+    """Build the packed sidecar from the (codes, scale) pairs computed during
+    the original quantization pass -- NOT by re-deriving them from the
+    already-quantized model weights (see quantize_linear_modules docstring)."""
+    packed_tensors = {}
+    manifest = {"granularity": granularity, "group_size": group_size, "layers": {}}
+    shapes = {name: module.weight.shape for name, module in model.named_modules() if name in quantized}
+
+    for name, (codes, scale) in quantized.items():
+        packed = pack_ternary_2bit(codes)
+        key = name.replace(".", "__")
+        packed_tensors[f"{key}.packed"] = packed
+        packed_tensors[f"{key}.scale"] = scale.to(torch.float32).contiguous()
+        manifest["layers"][name] = {
+            "shape": list(shapes[name]),
+            "packed_key": f"{key}.packed",
+            "scale_key": f"{key}.scale",
+            "scale_shape": list(scale.shape),
+        }
+
+    return packed_tensors, manifest
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+
+    if args.granularity == "group" and not args.group_size:
+        print("error: --granularity=group requires --group-size", file=sys.stderr)
+        return 2
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    print(f"Loading {args.model!r} (dtype={args.dtype}) ...")
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        revision=args.revision,
+        torch_dtype=DTYPE_MAP[args.dtype],
+        trust_remote_code=args.trust_remote_code,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model, revision=args.revision, trust_remote_code=args.trust_remote_code
+    )
+
+    skip_patterns = [s for s in args.skip.split(",") if s]
+    print(f"Quantizing Linear layers (granularity={args.granularity}, skip={skip_patterns}) ...")
+    stats, quantized = quantize_linear_modules(
+        model, granularity=args.granularity, group_size=args.group_size, skip_patterns=skip_patterns
+    )
+    summarize(stats)
+
+    if args.dry_run:
+        print("Dry run: not saving anything.")
+        return 0
+
+    out_dir = pathlib.Path(args.output)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Saving drop-in HF checkpoint (ternary-valued weights) to {out_dir} ...")
+    model.save_pretrained(out_dir, max_shard_size=args.max_shard_size, safe_serialization=True)
+    tokenizer.save_pretrained(out_dir)
+
+    stats_path = out_dir / "hugo_stats.json"
+    stats_path.write_text(json.dumps([dataclasses_asdict(s) for s in stats], indent=2))
+    print(f"Wrote per-layer quantization stats to {stats_path}")
+
+    if args.pack:
+        from safetensors.torch import save_file
+
+        pack_dir = out_dir / "ternary_packed"
+        pack_dir.mkdir(exist_ok=True)
+        print(f"Building 2-bit packed sidecar under {pack_dir} ...")
+        packed_tensors, manifest = build_packed_sidecar(model, quantized, args.granularity, args.group_size)
+        save_file(packed_tensors, str(pack_dir / "packed.safetensors"))
+        (pack_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        print(f"Packed sidecar written ({len(packed_tensors) // 2} layers).")
+
+    print("Done.")
+    return 0
+
+
+def dataclasses_asdict(stats: LayerQuantStats) -> dict:
+    import dataclasses
+
+    return dataclasses.asdict(stats)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

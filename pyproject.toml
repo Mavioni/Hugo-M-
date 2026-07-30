@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugo"
+version = "0.1.0"
+description = "Post-training ternary (1.58-bit) weight quantization for Hugging Face models"
+readme = "README.md"
+license = { text = "AGPL-3.0-or-later" }
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "transformers>=4.40",
+    "safetensors>=0.4",
+    "huggingface_hub>=0.20",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff==0.16.0", "datasets>=2.14"]
+# QAT training needs a dataset loader; PTQ-only users don't.
+train = ["datasets>=2.14"]
+
+[project.scripts]
+hugo-ternarize = "hugo.ternarize:main"
+hugo-stream-ternarize = "hugo.stream_ternarize:main"
+hugo-reconstruct = "hugo.reconstruct:main"
+hugo-train-qat = "hugo.train_qat:main"
+hugo-push = "hugo.push_to_hub:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+src = ["src"]
