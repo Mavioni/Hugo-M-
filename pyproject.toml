@@ -41,7 +41,7 @@ dependencies = [
     "torch>=2.1",
     "transformers>=4.40",
     "safetensors>=0.4",
-    "huggingface_hub>=0.20",
+    "huggingface_hub>=1.25.1",
 ]
 
 [project.urls]
