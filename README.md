@@ -8,11 +8,11 @@
   <a href="https://pypi.org/project/hugo/"><img src="https://img.shields.io/pypi/v/hugo?label=pypi" alt="pypi"></a>
 </p>
 
-<p align="center"><strong>Post-training ternary weight quantization for Hugging Face models.</strong></p>
+<p align="center"><strong>Post-training ternary weight quantization for any PyTorch model.</strong></p>
 
 ---
 
-Hugo converts any Hugging Face causal language model's linear layers to
+Hugo converts any language model's linear layers to
 **ternary weights** — each weight becomes one of three values: `{-1, 0, +1}`
 multiplied by a learned scale factor. This is the "1.58-bit" representation
 from [BitNet b1.58](https://arxiv.org/abs/2402.17764): ~8× smaller than fp16
@@ -126,6 +126,27 @@ hugo-stream-ternarize \
 hugo-reconstruct \
     --input ./out/large-model-ternary \
     --output ./out/large-model-ternary-full
+```
+
+### Quantize an OpenMythos model
+
+```bash
+pip install -e ".[mythos]"
+```
+
+```python
+from hugo.openmythos import load_mythos_checkpoint, quantize_mythos, MythosQATTrainer
+
+# PTQ: one-shot ternary quantization
+model = load_mythos_checkpoint("checkpoints/step_0020000.pt")
+stats = quantize_mythos(model)
+torch.save(model.state_dict(), "mythos-ternary.pt")
+
+# QAT: train the model to tolerate ternary rounding
+model = load_mythos_checkpoint("checkpoints/step_0020000.pt")
+trainer = MythosQATTrainer(model)
+trainer.train(steps=1000, lr=1e-5)
+trainer.bake()
 ```
 
 ---

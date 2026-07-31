@@ -36,6 +36,19 @@ from hugo.streaming import (
     resolve_weight_map,
 )
 
+try:
+    from hugo.openmythos import (
+        MythosLMWrapper,
+        MythosQATConfig,
+        MythosQATTrainer,
+        load_mythos_checkpoint,
+        quantize_mythos,
+    )
+
+    _has_mythos = True
+except ImportError:
+    _has_mythos = False
+
 __all__ = [
     # Pure math (PTQ)
     "ternarize_weight",
@@ -69,3 +82,11 @@ __all__ = [
     # Packed loading
     "load_layer_weight",
 ]
+if _has_mythos:
+    __all__ += [
+        "load_mythos_checkpoint",
+        "quantize_mythos",
+        "MythosQATTrainer",
+        "MythosQATConfig",
+        "MythosLMWrapper",
+    ]
