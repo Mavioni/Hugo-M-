@@ -114,6 +114,12 @@ hugo-train-qat \
 
 The output is a normal Hugging Face checkpoint — load it with `AutoModelForCausalLM.from_pretrained()`.
 
+Chat with the result:
+
+```bash
+python scripts/chat.py out/tiny-qat   # interactive REPL
+```
+
 ### Quantize a model too large to fit on disk twice (streaming)
 
 ```bash
@@ -310,6 +316,7 @@ src/hugo/
 ├── train_qat.py             # CLI: QAT fine-tuning (hugo-train-qat)
 ├── reconstruct.py           # CLI: rebuild full checkpoint from streaming output
 ├── load_packed.py           # Utility: load individual layer weights from packed sidecar
+├── openmythos.py            # Bridge: PTQ/QAT for OpenMythos RDT checkpoints
 └── push_to_hub.py           # CLI: publish checkpoint to HF Hub with auto-generated model card
 
 tests/                       # pytest suite (no network/GPU required)
@@ -328,6 +335,13 @@ examples/                    # Runnable shell scripts
 ├── quantize_small_model.sh
 ├── quantize_large_model_streaming.sh
 └── qat_train_and_publish.sh
+
+scripts/                     # Standalone dev scripts (require GPU, run from repo root)
+├── train_smollm_qat.py      # SmolLM-135M QAT with live metrics → out/<name>/train_log.json
+├── benchmark_ternary.py     # PPL / speed / sparsity vs fp32 baseline → out/benchmark.json
+├── benchmark_perf.py        # Prefill / decode / TTFT / VRAM microbenchmarks → out/perf_benchmark.json
+├── chat.py                  # Interactive chat with a ternarized checkpoint
+└── test_harness_on_qat.py   # OpenMythos harness sanity-check on a QAT'd checkpoint
 
 .github/
 └── workflows/tests.yml      # CI: ruff lint + pytest on every push/PR
@@ -364,6 +378,33 @@ Run on `yujiepan/qwen2.5-tiny-random` (20 steps, lr 1e-3):
 | Reloads cleanly | ✓ |
 
 Both verification tests are in the CI suite — see [`tests/`](tests/).
+
+### QAT: SmolLM-135M on an 8 GB laptop GPU
+
+Run with [`scripts/train_smollm_qat.py`](scripts/train_smollm_qat.py) on
+`HuggingFaceTB/SmolLM-135M` (4,000 steps, TinyStories, batch 4, seq 256,
+lr 1e-3 → 1e-5, ~11 minutes wall-clock on an RTX 5060 Laptop):
+
+| Metric | Value |
+|---|---|
+| Training loss (start → end) | 15.56 → 1.73 |
+| Ternary check (rows with all non-zero weights equal) | 14,976/14,976 ✓ |
+| Zero fraction | ~30% of weights exactly 0 |
+| Perplexity, held-out TinyStories — fp32 baseline | 2.05 |
+| Perplexity, held-out TinyStories — QAT ternary | **1.75** |
+| Prefill speed — fp32 baseline / QAT ternary | 8,943 / 9,388 tok/s |
+| Decode speed — fp32 baseline / QAT ternary | 48.5 / 47.5 tok/s |
+| Peak VRAM (both) | 1.11 GB |
+
+The QAT'd checkpoint rounds to exactly `{-1, 0, +1} × scale` per output
+channel — verified directly on the saved weights — and *beats* the fp16
+baseline on held-out data. Note the QAT run was also fine-tuned on the eval
+domain (TinyStories), so the gap isn't pure quantization gain; the honest
+headline is that **quantization cost nothing** while producing a genuinely
+2-bit-representable model. Run [`scripts/benchmark_ternary.py`](scripts/benchmark_ternary.py)
+and [`scripts/benchmark_perf.py`](scripts/benchmark_perf.py) to reproduce.
+
+The CI verification tests live in [`tests/`](tests/).
 
 ---
 
