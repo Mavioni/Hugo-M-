@@ -36,7 +36,9 @@ import argparse
 import json
 import math
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch.utils.data import DataLoader
@@ -78,6 +80,24 @@ def parse_args(argv=None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _load_model_and_tokenizer(model_id: str, dtype, trust_remote_code: bool) -> tuple[Any, Any]:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, dtype=dtype, trust_remote_code=trust_remote_code
+    )
+    return model, tokenizer
+
+
+def _resolve_device(requested: str | None) -> str:
+    if requested:
+        return requested
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def build_dataloader(args, tokenizer):
     from datasets import load_dataset
 
@@ -95,8 +115,6 @@ def build_dataloader(args, tokenizer):
             batch_texts, return_tensors="pt", padding="max_length",
             truncation=True, max_length=args.max_length,
         )
-        # Causal LM loss: labels = input_ids, with padding masked out so the
-        # model isn't trained to predict pad tokens.
         labels = enc["input_ids"].clone()
         labels[enc["attention_mask"] == 0] = -100
         enc["labels"] = labels
@@ -105,26 +123,33 @@ def build_dataloader(args, tokenizer):
     return DataLoader(texts, batch_size=args.batch_size, shuffle=True, collate_fn=collate)
 
 
-def main(argv=None) -> int:
+def _save_output(model, tokenizer, out_dir: Path, run_metadata: dict) -> None:
+    model.save_pretrained(out_dir, safe_serialization=True)
+    tokenizer.save_pretrained(out_dir)
+    (out_dir / "hugo_qat_run.json").write_text(json.dumps(run_metadata, indent=2))
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    _load_fn: Callable = _load_model_and_tokenizer,
+    _device_fn: Callable = _resolve_device,
+    _dataloader_fn: Callable = build_dataloader,
+    _save_fn: Callable = _save_output,
+    _push_fn: Callable | None = None,
+) -> int:
     args = parse_args(argv)
     if args.granularity == "group" and not args.group_size:
         print("error: --granularity=group requires --group-size", file=sys.stderr)
         return 2
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = _device_fn(args.device)
     dtype = torch.bfloat16 if args.bf16 else torch.float32
     if device == "cpu" and args.bf16:
         print("warning: --bf16 on CPU is slow and poorly supported; consider dropping it", file=sys.stderr)
 
     print(f"Loading {args.model!r} (device={device}, dtype={dtype}) ...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, dtype=dtype, trust_remote_code=args.trust_remote_code
-    )
+    model, tokenizer = _load_fn(args.model, dtype, args.trust_remote_code)
     model.to(device)
 
     skip_patterns = [s for s in args.skip.split(",") if s]
@@ -134,7 +159,7 @@ def main(argv=None) -> int:
         print("error: no layers were converted -- check --skip patterns", file=sys.stderr)
         return 1
 
-    dataloader = build_dataloader(args, tokenizer)
+    dataloader = _dataloader_fn(args, tokenizer)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     total_steps = args.max_steps or math.ceil(len(dataloader) * args.epochs / args.grad_accum)
@@ -182,10 +207,7 @@ def main(argv=None) -> int:
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(out_dir, safe_serialization=True)
-    tokenizer.save_pretrained(out_dir)
-
-    (out_dir / "hugo_qat_run.json").write_text(json.dumps({
+    run_metadata = {
         "source_model": args.model,
         "granularity": args.granularity,
         "group_size": args.group_size,
@@ -200,14 +222,17 @@ def main(argv=None) -> int:
         "dataset": f"{args.dataset}/{args.dataset_config}:{args.dataset_split}",
         "first_loss": first_loss,
         "mean_final_loss": mean_last,
-    }, indent=2))
+    }
+    _save_fn(model, tokenizer, out_dir, run_metadata)
     print(f"Saved QAT'd checkpoint to {out_dir}")
 
     if args.push_to_hub:
-        from hugo.push_to_hub import push_checkpoint
+        if _push_fn is None:
+            from hugo.push_to_hub import push_checkpoint
 
+            _push_fn = push_checkpoint
         print(f"Pushing to https://huggingface.co/{args.push_to_hub} ...")
-        url = push_checkpoint(out_dir, args.push_to_hub, private=args.private)
+        url = _push_fn(out_dir, args.push_to_hub, private=args.private)
         print(f"Pushed: {url}")
 
     return 0

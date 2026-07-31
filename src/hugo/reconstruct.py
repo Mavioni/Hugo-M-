@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
@@ -73,7 +74,26 @@ def reconstruct_shard(input_dir: Path, shard_entry: dict, dtype: torch.dtype,
     return tensors
 
 
-def main(argv=None) -> int:
+def _copy_aux_to_output(input_dir: Path, output_dir: Path,
+                        copy_fn: Callable[[Path, Path], None] = shutil.copy2) -> None:
+    skip_names = {"manifest.json", "ternary_packed", "plain_tensors", "_shard_cache"}
+    for item in input_dir.rglob("*"):
+        if not item.is_file():
+            continue
+        rel = item.relative_to(input_dir)
+        if rel.parts[0] in skip_names:
+            continue
+        dest = output_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        copy_fn(item, dest)
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    _save_file: Callable = save_file,
+    _copy_fn: Callable[[Path, Path], None] = shutil.copy2,
+) -> int:
     args = parse_args(argv)
     input_dir = Path(args.input)
     output_dir = Path(args.output)
@@ -94,7 +114,7 @@ def main(argv=None) -> int:
         tensors = reconstruct_shard(
             input_dir, manifest["shards"][shard_name], dtype, manifest.get("group_size")
         )
-        save_file(tensors, str(output_dir / shard_name))
+        _save_file(tensors, str(output_dir / shard_name))
         for name, t in tensors.items():
             weight_map[name] = shard_name
             total_size += t.numel() * t.element_size()
@@ -103,19 +123,7 @@ def main(argv=None) -> int:
     (output_dir / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
 
     print("Copying aux files (config/tokenizer/custom code/...) ...")
-    skip_names = {"manifest.json", "ternary_packed", "plain_tensors", "_shard_cache"}
-    # Walk recursively rather than only the top level: custom architectures
-    # can keep modeling code in subfolders that config.json's auto_map
-    # references by relative path, so the layout has to survive the copy.
-    for item in input_dir.rglob("*"):
-        if not item.is_file():
-            continue
-        rel = item.relative_to(input_dir)
-        if rel.parts[0] in skip_names:
-            continue
-        dest = output_dir / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(item, dest)
+    _copy_aux_to_output(input_dir, output_dir, _copy_fn)
 
     print(f"Done. Reconstructed checkpoint written to {output_dir}")
     return 0

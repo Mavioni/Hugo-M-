@@ -32,6 +32,7 @@ import json
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from hugo.streaming import (
@@ -151,7 +152,14 @@ def save_manifest(path: Path, manifest: dict) -> None:
     path.write_text(json.dumps(manifest, indent=2))
 
 
-def main(argv=None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    _copy_aux_fn: Callable = copy_aux_files,
+    _resolve_map_fn: Callable = resolve_weight_map,
+    _process_shard_fn: Callable = process_shard,
+    _cleanup_fn: Callable = shutil.rmtree,
+) -> int:
     args = parse_args(argv)
     if args.granularity == "group" and not args.group_size:
         print("error: --granularity=group requires --group-size", file=sys.stderr)
@@ -168,14 +176,17 @@ def main(argv=None) -> int:
     work_dir.mkdir(exist_ok=True)
 
     manifest_path = output_dir / "manifest.json"
-    manifest = load_manifest(manifest_path, args.model, args.revision, args.granularity, args.group_size, skip_patterns)
+    manifest = load_manifest(
+        manifest_path, args.model, args.revision, args.granularity,
+        args.group_size, skip_patterns,
+    )
 
     print(f"Copying config/tokenizer files from {args.model} ...")
-    copied = copy_aux_files(args.model, args.revision, args.token, output_dir)
+    copied = _copy_aux_fn(args.model, args.revision, args.token, output_dir)
     print(f"  copied {len(copied)} files: {copied}")
 
     print(f"Resolving weight map for {args.model} ...")
-    weight_map = resolve_weight_map(args.model, args.revision, args.token)
+    weight_map = _resolve_map_fn(args.model, args.revision, args.token)
     shard_to_names: dict[str, list[str]] = {}
     for name, shard in weight_map.items():
         shard_to_names.setdefault(shard, []).append(name)
@@ -192,7 +203,7 @@ def main(argv=None) -> int:
         t0 = time.time()
         print(f"[{shard_index + 1}/{len(shard_names)}] {shard_name}: downloading + quantizing "
               f"({len(shard_to_names[shard_name])} tensors) ...")
-        result = process_shard(
+        result = _process_shard_fn(
             repo_id=args.model,
             revision=args.revision,
             token=args.token,
@@ -213,11 +224,9 @@ def main(argv=None) -> int:
             "packed_file": result.packed_file,
             "plain_file": result.plain_file,
             "tensors": result.manifest_entries,
-            # Persist this shard's stats so a later resumed run can aggregate
-            # across shards it didn't process itself (see aggregate_stats).
             "layer_stats": [dataclasses.asdict(s) for s in result.layer_stats],
         }
-        save_manifest(manifest_path, manifest)  # persist after every shard so a crash loses at most one shard
+        save_manifest(manifest_path, manifest)
 
         print(f"    done in {dt:.1f}s, quantized {len(result.layer_stats)} layers this shard")
 
@@ -238,7 +247,7 @@ def main(argv=None) -> int:
               f"  (~{stats['fp16_equivalent_bytes'] / max(stats['packed_bytes'], 1):.1f}x smaller)")
 
     if not any(e.get("status") != "done" for e in manifest["shards"].values()) and len(manifest["shards"]) == len(shard_to_names):
-        shutil.rmtree(work_dir, ignore_errors=True)
+        _cleanup_fn(work_dir, ignore_errors=True)
         print("\nAll shards processed; removed shard scratch cache.")
     else:
         print(f"\n{sum(1 for e in manifest['shards'].values() if e.get('status') == 'done')}/{len(shard_to_names)} "

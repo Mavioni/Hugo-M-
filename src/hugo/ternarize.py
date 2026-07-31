@@ -25,8 +25,10 @@ import argparse
 import json
 import pathlib
 import sys
+from collections.abc import Callable
 
 import torch
+from torch import nn
 
 from hugo.quantize import (
     LayerQuantStats,
@@ -41,6 +43,36 @@ DTYPE_MAP = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
 }
+
+
+def _load_model_and_tokenizer(
+    model_id: str, revision: str | None, dtype: torch.dtype, trust_remote_code: bool
+) -> tuple[nn.Module, object]:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        revision=revision,
+        torch_dtype=dtype,
+        trust_remote_code=trust_remote_code,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id, revision=revision, trust_remote_code=trust_remote_code
+    )
+    return model, tokenizer
+
+
+def _save_checkpoint(model: nn.Module, tokenizer: object, out_dir: pathlib.Path,
+                     max_shard_size: str) -> None:
+    model.save_pretrained(out_dir, max_shard_size=max_shard_size, safe_serialization=True)
+    tokenizer.save_pretrained(out_dir)
+
+
+def _save_packed_sidecar(packed_tensors: dict, manifest: dict, pack_dir: pathlib.Path) -> None:
+    from safetensors.torch import save_file
+
+    save_file(packed_tensors, str(pack_dir / "packed.safetensors"))
+    (pack_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -120,24 +152,22 @@ def build_packed_sidecar(model, quantized: dict, granularity: str, group_size: i
     return packed_tensors, manifest
 
 
-def main(argv=None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    _load_fn: Callable = _load_model_and_tokenizer,
+    _save_fn: Callable = _save_checkpoint,
+    _pack_save_fn: Callable = _save_packed_sidecar,
+) -> int:
     args = parse_args(argv)
 
     if args.granularity == "group" and not args.group_size:
         print("error: --granularity=group requires --group-size", file=sys.stderr)
         return 2
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
     print(f"Loading {args.model!r} (dtype={args.dtype}) ...")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        revision=args.revision,
-        torch_dtype=DTYPE_MAP[args.dtype],
-        trust_remote_code=args.trust_remote_code,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model, revision=args.revision, trust_remote_code=args.trust_remote_code
+    model, tokenizer = _load_fn(
+        args.model, args.revision, DTYPE_MAP[args.dtype], args.trust_remote_code
     )
 
     skip_patterns = [s for s in args.skip.split(",") if s]
@@ -155,22 +185,20 @@ def main(argv=None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Saving drop-in HF checkpoint (ternary-valued weights) to {out_dir} ...")
-    model.save_pretrained(out_dir, max_shard_size=args.max_shard_size, safe_serialization=True)
-    tokenizer.save_pretrained(out_dir)
+    _save_fn(model, tokenizer, out_dir, args.max_shard_size)
 
     stats_path = out_dir / "hugo_stats.json"
     stats_path.write_text(json.dumps([dataclasses_asdict(s) for s in stats], indent=2))
     print(f"Wrote per-layer quantization stats to {stats_path}")
 
     if args.pack:
-        from safetensors.torch import save_file
-
         pack_dir = out_dir / "ternary_packed"
         pack_dir.mkdir(exist_ok=True)
         print(f"Building 2-bit packed sidecar under {pack_dir} ...")
-        packed_tensors, manifest = build_packed_sidecar(model, quantized, args.granularity, args.group_size)
-        save_file(packed_tensors, str(pack_dir / "packed.safetensors"))
-        (pack_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        packed_tensors, manifest = build_packed_sidecar(
+            model, quantized, args.granularity, args.group_size
+        )
+        _pack_save_fn(packed_tensors, manifest, pack_dir)
         print(f"Packed sidecar written ({len(packed_tensors) // 2} layers).")
 
     print("Done.")

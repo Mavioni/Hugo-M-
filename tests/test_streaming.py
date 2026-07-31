@@ -104,7 +104,7 @@ def _done_shard(names_and_shapes, errors):
         "layer_stats": [
             {"name": n, "shape": list(s), "granularity": "channel",
              "relative_l2_error": e, "zero_fraction": 0.3}
-            for (n, s), e in zip(names_and_shapes, errors)
+            for (n, s), e in zip(names_and_shapes, errors, strict=False)
         ],
     }
 

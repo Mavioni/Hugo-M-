@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -150,16 +151,24 @@ def build_model_card(checkpoint_dir: Path, repo_id: str) -> str:
 
 
 def push_checkpoint(checkpoint_dir: str | Path, repo_id: str, private: bool = False,
-                     write_model_card: bool = True) -> str:
+                     write_model_card: bool = True, *,
+                     _token_fn: Callable[[], str] = _resolve_token,
+                     _api_factory: Callable = None) -> str:
     """Upload a checkpoint directory to the Hub. Returns the repo URL."""
-    from huggingface_hub import HfApi
 
     checkpoint_dir = Path(checkpoint_dir)
     if not checkpoint_dir.is_dir():
         raise SystemExit(f"checkpoint dir does not exist: {checkpoint_dir}")
 
-    token = _resolve_token()
-    api = HfApi(token=token)
+    token = _token_fn()
+    if _api_factory is None:
+        from huggingface_hub import HfApi
+
+        def _default_api(t):
+            return HfApi(token=t)
+
+        _api_factory = _default_api
+    api = _api_factory(token)
 
     if write_model_card:
         card_path = checkpoint_dir / "README.md"
@@ -190,12 +199,18 @@ def parse_args(argv=None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def main(argv=None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    _token_fn: Callable[[], str] = _resolve_token,
+    _api_factory: Callable = None,
+    _push_fn: Callable = push_checkpoint,
+) -> int:
     args = parse_args(argv)
     checkpoint_dir = Path(args.checkpoint)
 
     if args.dry_run:
-        _resolve_token()
+        _token_fn()
         print("Credentials: found.")
         print(f"Would create/push to: https://huggingface.co/{args.repo_id} "
               f"({'private' if args.private else 'public'})")
@@ -204,8 +219,9 @@ def main(argv=None) -> int:
             print(build_model_card(checkpoint_dir, args.repo_id))
         return 0
 
-    url = push_checkpoint(checkpoint_dir, args.repo_id, private=args.private,
-                           write_model_card=not args.no_model_card)
+    url = _push_fn(checkpoint_dir, args.repo_id, private=args.private,
+                    write_model_card=not args.no_model_card,
+                    _token_fn=_token_fn, _api_factory=_api_factory)
     print(f"Pushed: {url}")
     return 0
 
