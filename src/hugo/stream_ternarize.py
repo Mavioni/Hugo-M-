@@ -263,12 +263,16 @@ def main(
         print(f"  merkle root               : {manifest.get('merkle_root', 'N/A')}")
         print(f"  integrity-verified shards : {len(shard_hashes)}")
 
-    if not any(e.get("status") != "done" for e in manifest["shards"].values()) and len(manifest["shards"]) == len(shard_to_names):
+    all_done = not any(
+        e.get("status") != "done" for e in manifest["shards"].values()
+    ) and len(manifest["shards"]) == len(shard_to_names)
+    if all_done:
         _cleanup_fn(work_dir, ignore_errors=True)
         print("\nAll shards processed; removed shard scratch cache.")
     else:
-        print(f"\n{sum(1 for e in manifest['shards'].values() if e.get('status') == 'done')}/{len(shard_to_names)} "
-              f"shards done overall. Re-run the same command to continue.")
+        done = sum(1 for e in manifest["shards"].values() if e.get("status") == "done")
+        print(f"\n{done}/{len(shard_to_names)} shards done overall. "
+              f"Re-run the same command to continue.")
 
     return 0
 

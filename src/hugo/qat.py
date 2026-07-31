@@ -96,7 +96,9 @@ class BitLinear(nn.Linear):
         return nn.functional.linear(x, w_q, self.bias)
 
     @classmethod
-    def from_linear(cls, linear: nn.Linear, granularity: str = "channel", group_size: int | None = None) -> BitLinear:
+    def from_linear(
+        cls, linear: nn.Linear, granularity: str = "channel", group_size: int | None = None
+    ) -> BitLinear:
         """Build a BitLinear that trains the SAME parameter tensors as
         `linear` (not copies) -- so converting a pretrained model in place
         continues training its actual pretrained weights, fake-quantized,
@@ -124,7 +126,11 @@ def convert_to_bitlinear(
     for parent_name, parent in list(model.named_modules()):
         for child_name, child in list(parent.named_children()):
             full_name = f"{parent_name}.{child_name}" if parent_name else child_name
-            if isinstance(child, nn.Linear) and not isinstance(child, BitLinear) and not should_skip(full_name, skip_patterns):
+            if (
+                isinstance(child, nn.Linear)
+                and not isinstance(child, BitLinear)
+                and not should_skip(full_name, skip_patterns)
+            ):
                 setattr(parent, child_name, BitLinear.from_linear(child, granularity, group_size))
                 replaced.append(full_name)
     return replaced

@@ -63,7 +63,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help=f"Comma-separated substrings of module names to leave in full precision "
                         f"(default: {','.join(DEFAULT_SKIP)})")
     p.add_argument("--epochs", type=float, default=1.0)
-    p.add_argument("--max-steps", type=int, default=None, help="Stop after N optimizer steps (overrides --epochs)")
+    p.add_argument("--max-steps", type=int, default=None,
+                   help="Stop after N optimizer steps (overrides --epochs)")
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--grad-accum", type=int, default=1, help="Gradient accumulation steps")
     p.add_argument("--lr", type=float, default=1e-5)

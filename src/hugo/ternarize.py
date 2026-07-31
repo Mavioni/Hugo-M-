@@ -130,7 +130,10 @@ def summarize(stats: list[LayerQuantStats]) -> None:
     print(f"Quantized {len(stats)} Linear layers, {total_params:,} weight elements")
     print(f"  avg relative L2 error : {avg_err:.4f}")
     print(f"  avg zero fraction     : {avg_zero:.4f}  (share of weights rounded to 0)")
-    print(f"  worst layer           : {worst.name} (rel. L2 error {worst.relative_l2_error:.4f}, shape {worst.shape})")
+    print(
+        f"  worst layer           : {worst.name} "
+        f"(rel. L2 error {worst.relative_l2_error:.4f}, shape {worst.shape})"
+    )
 
     fp16_bytes = total_params * 2
     packed_bytes = sum((s.shape[0] * s.shape[1] + 3) // 4 for s in stats)

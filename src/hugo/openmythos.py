@@ -30,15 +30,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 
 from hugo.qat import bake_bitlinear_to_linear, convert_to_bitlinear
 from hugo.quantize import quantize_linear_modules
-
 
 # ---------------------------------------------------------------------------
 # Checkpoint loading
@@ -108,8 +105,8 @@ class MythosLMWrapper(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
+        labels: torch.Tensor | None = None,
         **kwargs,
     ) -> dict:
         logits = self.model(input_ids)
@@ -143,8 +140,8 @@ class MythosLMWrapper(nn.Module):
 def quantize_mythos(
     model: nn.Module,
     granularity: str = "channel",
-    group_size: Optional[int] = None,
-    skip_patterns: Optional[list[str]] = None,
+    group_size: int | None = None,
+    skip_patterns: list[str] | None = None,
 ) -> dict:
     """Apply Hugo PTQ to an OpenMythos model in-place.
 
@@ -188,8 +185,8 @@ def quantize_mythos(
 @dataclass
 class MythosQATConfig:
     granularity: str = "channel"
-    group_size: Optional[int] = None
-    skip_patterns: Optional[list[str]] = None
+    group_size: int | None = None
+    skip_patterns: list[str] | None = None
     lr: float = 1e-5
     batch_size: int = 1
     grad_accum: int = 8
@@ -215,7 +212,7 @@ class MythosQATTrainer:
         self,
         model: nn.Module,
         dataset_subset: str = "sample-10BT",
-        cfg: Optional[MythosQATConfig] = None,
+        cfg: MythosQATConfig | None = None,
     ):
         self.cfg = cfg or MythosQATConfig()
         self.model = model
@@ -248,7 +245,7 @@ class MythosQATTrainer:
     def train(
         self,
         steps: int,
-        lr: Optional[float] = None,
+        lr: float | None = None,
         device: str = "cuda",
         bf16: bool = True,
     ) -> list[float]:
@@ -313,7 +310,6 @@ class MythosQATTrainer:
 
     def _build_dataloader(self, encoding):
         from datasets import load_dataset
-        from open_mythos.tokenizer import MythosTokenizer
 
         ds = load_dataset(
             "HuggingFaceFW/fineweb-edu",
