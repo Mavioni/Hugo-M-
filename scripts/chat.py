@@ -6,13 +6,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def main():
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "out/qwen0.5b-qat"
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "Qwen/Qwen2.5-0.5B"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16
 
     print(f"Loading {model_path} on {device}...")
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, trust_remote_code=True, torch_dtype=dtype
+        model_path, trust_remote_code=True, dtype=dtype
     ).to(device).eval()
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
