@@ -26,7 +26,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from hugo.quantize import _absmean_scale, should_skip
+from hugo.pure import _absmean_scale, should_skip
 
 
 class _TernaryFakeQuantSTE(torch.autograd.Function):

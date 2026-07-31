@@ -30,9 +30,14 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
-from hugo.quantize import (
+from hugo.pure import (
     LayerQuantStats,
+    build_shard_integrity_hash,
+    hash_packed_layer,
+    merkle_root,
     pack_ternary_2bit,
+)
+from hugo.quantize import (
     quantize_linear_modules,
 )
 
@@ -71,7 +76,13 @@ def _save_checkpoint(model: nn.Module, tokenizer: object, out_dir: pathlib.Path,
 def _save_packed_sidecar(packed_tensors: dict, manifest: dict, pack_dir: pathlib.Path) -> None:
     from safetensors.torch import save_file
 
-    save_file(packed_tensors, str(pack_dir / "packed.safetensors"))
+    saved_path = pack_dir / "packed.safetensors"
+    save_file(packed_tensors, str(saved_path))
+
+    integrity_hash = build_shard_integrity_hash(packed_tensors)
+    manifest["sha256"] = integrity_hash
+    manifest["merkle_root"] = integrity_hash
+
     (pack_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
 
@@ -132,23 +143,33 @@ def summarize(stats: list[LayerQuantStats]) -> None:
 def build_packed_sidecar(model, quantized: dict, granularity: str, group_size: int | None):
     """Build the packed sidecar from the (codes, scale) pairs computed during
     the original quantization pass -- NOT by re-deriving them from the
-    already-quantized model weights (see quantize_linear_modules docstring)."""
+    already-quantized model weights (see quantize_linear_modules docstring).
+
+    Each layer's packed codes are individually SHA-256 hashed, and a Merkle
+    root is computed over all layers for content-integrity verification.
+    """
     packed_tensors = {}
-    manifest = {"granularity": granularity, "group_size": group_size, "layers": {}}
+    layer_hashes: list[str] = []
+    manifest: dict = {"granularity": granularity, "group_size": group_size, "layers": {}}
     shapes = {name: module.weight.shape for name, module in model.named_modules() if name in quantized}
 
     for name, (codes, scale) in quantized.items():
         packed = pack_ternary_2bit(codes)
         key = name.replace(".", "__")
         packed_tensors[f"{key}.packed"] = packed
-        packed_tensors[f"{key}.scale"] = scale.to(torch.float32).contiguous()
+        scale_contig = scale.to(torch.float32).contiguous()
+        packed_tensors[f"{key}.scale"] = scale_contig
+        layer_hash = hash_packed_layer(packed, scale_contig)
+        layer_hashes.append(layer_hash)
         manifest["layers"][name] = {
             "shape": list(shapes[name]),
             "packed_key": f"{key}.packed",
             "scale_key": f"{key}.scale",
             "scale_shape": list(scale.shape),
+            "sha256": layer_hash,
         }
 
+    manifest["merkle_root"] = merkle_root(layer_hashes)
     return packed_tensors, manifest
 
 

@@ -35,6 +35,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from hugo.pure import merkle_root
 from hugo.streaming import (
     DEFAULT_SKIP_SUBSTRINGS,
     copy_aux_files,
@@ -225,6 +226,7 @@ def main(
             "plain_file": result.plain_file,
             "tensors": result.manifest_entries,
             "layer_stats": [dataclasses.asdict(s) for s in result.layer_stats],
+            "sha256": result.sha256,
         }
         save_manifest(manifest_path, manifest)
 
@@ -233,8 +235,19 @@ def main(
     stats = aggregate_stats(manifest)
     if stats:
         manifest["stats"] = stats
+
+    shard_hashes = [
+        entry["sha256"]
+        for entry in manifest["shards"].values()
+        if entry.get("status") == "done" and entry.get("sha256")
+    ]
+    if shard_hashes:
+        manifest["merkle_root"] = merkle_root(shard_hashes)
+
+    if stats or shard_hashes:
         save_manifest(manifest_path, manifest)
 
+    if stats:
         print("\n--- summary (all completed shards, including any from earlier runs) ---")
         print(f"  quantized layers          : {stats['num_quantized_layers']}")
         print(f"  quantized weight elements : {stats['total_quantized_elements']:,}")
@@ -245,6 +258,10 @@ def main(
         print(f"  fp16-equivalent size      : {human_bytes(stats['fp16_equivalent_bytes'])}")
         print(f"  packed size (2-bit)       : {human_bytes(stats['packed_bytes'])}"
               f"  (~{stats['fp16_equivalent_bytes'] / max(stats['packed_bytes'], 1):.1f}x smaller)")
+
+    if shard_hashes:
+        print(f"  merkle root               : {manifest.get('merkle_root', 'N/A')}")
+        print(f"  integrity-verified shards : {len(shard_hashes)}")
 
     if not any(e.get("status") != "done" for e in manifest["shards"].values()) and len(manifest["shards"]) == len(shard_to_names):
         _cleanup_fn(work_dir, ignore_errors=True)

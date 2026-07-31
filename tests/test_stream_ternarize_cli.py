@@ -42,6 +42,7 @@ def test_main_runs_pipeline_with_injected_deps(tmp_path):
             )],
             packed_file="p/shard.safetensors",
             plain_file=None,
+            sha256="a" * 64,
         )
 
     def fake_cleanup(path, ignore_errors=False):
@@ -141,6 +142,7 @@ def test_main_does_not_cleanup_when_shards_remain(tmp_path):
     def fake_process(**k):
         return ShardResult(
             shard_name="x", manifest_entries={}, layer_stats=[], packed_file=None, plain_file=None,
+            sha256=None,
         )
 
     rc = main(

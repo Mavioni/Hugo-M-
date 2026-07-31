@@ -1,6 +1,25 @@
 __version__ = "0.2.0"
 
 from hugo.load_packed import load_layer_weight
+from hugo.pure import (
+    LayerQuantStats,
+    _absmean_scale,  # noqa: F401 — public API
+    active_code_fraction,
+    build_shard_integrity_hash,
+    codes_are_ternary,
+    compute_tensor_sha256,
+    dequantize_weight,
+    hash_manifest_shard,
+    hash_packed_layer,
+    merkle_root,
+    pack_ternary_2bit,
+    quantization_stats,
+    should_skip,
+    ternarize_is_contractive,
+    ternarize_weight,
+    unpack_ternary_2bit,
+    verify_manifest_integrity,
+)
 from hugo.qat import (
     BitLinear,
     bake_bitlinear_to_linear,
@@ -8,13 +27,7 @@ from hugo.qat import (
     ternary_fake_quant,
 )
 from hugo.quantize import (
-    LayerQuantStats,
-    dequantize_weight,
-    pack_ternary_2bit,
     quantize_linear_modules,
-    should_skip,
-    ternarize_weight,
-    unpack_ternary_2bit,
 )
 from hugo.streaming import (
     copy_aux_files,
@@ -24,14 +37,25 @@ from hugo.streaming import (
 )
 
 __all__ = [
-    # Quantize (PTQ core math)
+    # Pure math (PTQ)
     "ternarize_weight",
     "dequantize_weight",
-    "quantize_linear_modules",
     "pack_ternary_2bit",
     "unpack_ternary_2bit",
     "LayerQuantStats",
     "should_skip",
+    "codes_are_ternary",
+    "active_code_fraction",
+    "ternarize_is_contractive",
+    "quantization_stats",
+    "compute_tensor_sha256",
+    "hash_packed_layer",
+    "merkle_root",
+    "hash_manifest_shard",
+    "build_shard_integrity_hash",
+    "verify_manifest_integrity",
+    # PTQ impure (model mutation)
+    "quantize_linear_modules",
     # QAT (quantization-aware training)
     "ternary_fake_quant",
     "BitLinear",

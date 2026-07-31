@@ -7,7 +7,7 @@ import pathlib
 import torch
 from safetensors.torch import load_file
 
-from hugo.quantize import dequantize_weight, unpack_ternary_2bit
+from hugo.pure import dequantize_weight, unpack_ternary_2bit
 
 
 def load_layer_weight(pack_dir: str | pathlib.Path, layer_name: str) -> torch.Tensor:

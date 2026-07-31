@@ -30,7 +30,7 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file, save_file
 
-from hugo.quantize import dequantize_weight, unpack_ternary_2bit
+from hugo.pure import dequantize_weight, unpack_ternary_2bit
 
 DTYPE_MAP = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
 

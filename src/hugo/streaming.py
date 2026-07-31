@@ -33,8 +33,9 @@ from huggingface_hub.errors import EntryNotFoundError
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from hugo.quantize import (
+from hugo.pure import (
     LayerQuantStats,
+    build_shard_integrity_hash,
     pack_ternary_2bit,
     quantization_stats,
     ternarize_weight,
@@ -126,6 +127,7 @@ class ShardResult:
     layer_stats: list[LayerQuantStats]
     packed_file: str | None
     plain_file: str | None
+    sha256: str | None
 
 
 def process_shard(
@@ -177,13 +179,15 @@ def process_shard(
 
     packed_file = None
     plain_file = None
+    sha256 = None
     if packed_tensors:
         packed_file = f"ternary_packed/packed_shard_{shard_index:05d}.safetensors"
         save_file(packed_tensors, str(packed_dir / f"packed_shard_{shard_index:05d}.safetensors"))
+        sha256 = build_shard_integrity_hash(packed_tensors)
     if plain_tensors:
         plain_file = f"plain_tensors/plain_shard_{shard_index:05d}.safetensors"
         save_file(plain_tensors, str(plain_dir / f"plain_shard_{shard_index:05d}.safetensors"))
 
     os.remove(local_path)  # reclaim disk before moving on to the next shard
 
-    return ShardResult(shard_name, manifest_entries, layer_stats, packed_file, plain_file)
+    return ShardResult(shard_name, manifest_entries, layer_stats, packed_file, plain_file, sha256)
