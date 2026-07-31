@@ -1,83 +1,110 @@
 # Hugo
 
-<!-- Badges -->
 <p align="center">
   <a href="https://github.com/Mavioni/Hugo-M-/actions/workflows/tests.yml"><img src="https://github.com/Mavioni/Hugo-M-/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="license"></a>
   <a href="https://pypi.org/project/hugo/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="python"></a>
-  <a href="https://pypi.org/project/hugo/"><img src="https://img.shields.io/pypi/v/hugo?label=pypi" alt="pypi"></a>
+  <img src="https://img.shields.io/badge/bitwidth-1.58--bit-8A2BE2.svg" alt="1.58-bit">
+  <img src="https://img.shields.io/badge/storage-8%C3%97%20smaller-00C853.svg" alt="8x smaller">
 </p>
 
-<p align="center"><strong>Post-training ternary weight quantization for any PyTorch model.</strong></p>
+<p align="center"><strong>Ternary weight quantization for any PyTorch LLM.<br>
+1.58 bits per weight · ~8× smaller on disk · drop-in Hugging Face checkpoints.</strong></p>
+
+<div align="center"><pre>
+   ┌────────────────────────────┐         ┌────────────────────────────┐
+   │  fp16 · 16 bits/weight     │         │  ternary · 1.58 bits       │
+   │  [-0.83, 1.45, 0.02]       │  ────▸  │  { -1, +1, 0, -1 } × scale │
+   │  [-2.10, ...]              │         │  4 codes packed per byte   │
+   └────────────────────────────┘         └────────────────────────────┘
+</pre></div>
+
+> **TL;DR** — Hugo converts every `nn.Linear` weight in a Hugging Face model to
+> three values — `{-1, 0, +1}` times a scale — the "1.58-bit" representation
+> from [BitNet b1.58](https://arxiv.org/abs/2402.17764). It gives you ~8×
+> smaller storage now, and a quantization-aware training path that teaches
+> weights to *survive* the rounding.
 
 ---
 
-Hugo converts any language model's linear layers to
-**ternary weights** — each weight becomes one of three values: `{-1, 0, +1}`
-multiplied by a learned scale factor. This is the "1.58-bit" representation
-from [BitNet b1.58](https://arxiv.org/abs/2402.17764): ~8× smaller than fp16
-with the potential for faster inference on ternary-aware hardware.
+## How it works
 
-Hugo gives you **two paths**:
+```
+        W  = [-0.83,  1.45,  0.02, -2.10, ...]          fp16 · 16 bits/weight
+                        │
+                        ▼   scale = mean(|W|) = 1.10    absmean, per channel
+                        │
+        W/s = [-0.75,  1.32,  0.02, -1.91]
+                        │
+                        ▼   round(clip(·, -1, +1))      ternary rounding
+                        │
+         Ŵ/s = [  -1,   +1,    0,   -1  ]                 codes ∈ {-1, 0, +1}
+                        │
+                        ▼   × scale
+                        │
+        Ŵ  = [-1.10,  1.10,  0.00, -1.10]               ≈ W · 1.58 bits/weight
+```
 
-| | Path | What happens | When to use it |
-|---|---|---|---|
-| 🔧 | **PTQ** (post-training quantization) | Round already-trained weights to ternary in one shot | Quick experiments, disk compression, tool evaluation |
-| 🏋️ | **QAT** (quantization-aware training) | Train the model *with* ternary rounding inside the forward pass | Production models — weights learn to survive rounding |
+Modern LLMs store their knowledge as billions of 16-bit weights. Most of that
+information survives with far fewer bits: it lives in *which* weights are zero
+and *which direction* the rest point. Hugo keeps exactly that — three symbols
+per weight instead of 65,536 — and a single scale factor per group brings the
+values back to the right magnitude.
+
+> **For practitioners:** BitNet b1.58-style absmean quantization with three
+> granularities — `tensor` (one scale for the whole matrix, highest error),
+> `channel` (one scale per output row, the default), and `group` (one scale per
+> N input elements, lowest error, more metadata). Hugo also genuinely compresses
+> codes to **2 bits each** via `--pack` (4 codes per byte), so a 45.7 GB fp16
+> model becomes a **5.7 GB** packed sidecar. Realizing the speedup needs a
+> ternary-aware runtime like [bitnet.cpp](https://github.com/microsoft/BitNet).
 
 ---
 
 ## Table of Contents
 
-- [What is ternary quantization?](#what-is-ternary-quantization) — no prior knowledge needed
+- [How it works](#how-it-works) — one picture, no prior knowledge needed
+- [Two paths](#two-paths) — PTQ vs QAT, and when to pick which
 - [Quickstart](#quickstart) — copy-paste to see it work in 60 seconds
-- [Paths in detail](#paths-in-detail) — PTQ vs QAT explained
-- [Compute requirements](#compute-requirements) — what hardware you need for QAT training
+- [Paths in detail](#paths-in-detail) — what each path does, step by step
+- [Compute requirements](#compute-requirements) — what hardware QAT really needs
 - [Installation](#installation)
 - [CLI reference](#cli-reference)
 - [Repository structure](#repository-structure)
-- [Benchmarks](#benchmarks)
-- [Caveats](#caveats)
-- [Contributing](#contributing)
+- [Benchmarks](#benchmarks) — measured numbers, not vibes
+- [Caveats](#caveats) — read before you commit to this
+- [Contributing](#contributing) · [License](#license)
 
 ---
 
-## What is ternary quantization?
+## Two paths
 
-> **For absolute beginners:** Modern language models store their "knowledge" as billions of
-> numbers (called *weights*). Each weight is usually a 16-bit floating-point number. Ternary
-> quantization replaces each weight with just three possible values — -1, 0, or +1 — multiplied
-> by a single scaling factor per group. You go from 16 bits per weight to roughly 1.58 bits,
-> and the model still works because most of the important information is captured by *which*
-> weights are zero and which direction (positive/negative) the non-zero ones point.
-
-```mermaid
-flowchart LR
-    A["Original weights<br/>fp16: [-0.83, 1.45, 0.02, -2.10, ...]"] --> B["Divide by absmean<br/>scale = mean(|W|)"]
-    B --> C["Clip to [-1, 1]<br/>then round"]
-    C --> D["Ternary codes<br/>{-1, 0, +1}: [ -1, +1, 0, -1, ... ]"]
-    D --> E["Multiply back by scale"]
-    E --> F["Dequantized weights<br/>≈ original, but only 3 values/group"]
-```
-
-The math is simple:
+**PTQ — post-training quantization. Round it, ship it.**
 
 ```
-scale = mean(|W|)                            # one scale per output channel (default)
-W_ternary = round(clip(W / scale, -1, 1))    # map every weight to {-1, 0, +1}
-W_dequant = W_ternary × scale                 # reconstruct approximate weights
+   ┌────────────────┐      ┌────────────────┐      ┌────────────────┐
+   │  HF model      │ ───▸ │  round every   │ ───▸ │  drop-in HF    │
+   │  checkpoint    │      │  weight to     │      │  checkpoint    │
+   │  (as-is)       │      │  {-1,0,+1}×s   │      │  + 2-bit side  │
+   └────────────────┘      └────────────────┘      └────────────────┘
+      one pass, CPU           PTQ — no training       save_pretrained()
 ```
 
-Hugo also **genuinely compresses** weights to 2 bits each via `--pack` (4 ternary
-codes packed into one byte), so a 47 GB fp16 model becomes a ~5.9 GB packed sidecar.
-Realizing the speedup needs a ternary-aware runtime like
-[bitnet.cpp](https://github.com/microsoft/BitNet).
+**QAT — quantization-aware training. Train it to survive the rounding.**
 
-> **For practitioners:** This is BitNet b1.58-style absmean quantization with three
-> granularity levels: `tensor` (one scale for the whole matrix — highest error),
-> `channel` (one scale per output row — good default), and `group` (one scale per N
-> input elements — lowest error, more metadata). The PTQ path does this in one shot;
-> the QAT path fine-tunes the model so its weights *anticipate* being rounded.
+```
+   ┌────────────────┐      ┌────────────────┐      ┌────────────────┐
+   │  HF model      │ ───▸ │  train with    │ ───▸ │  plain model   │
+   │  checkpoint    │      │  ternary fake- │      │  checkpoint    │
+   │  (as-is)       │      │  quant + STE   │      │  ternary-valued│
+   └────────────────┘      └────────────────┘      └────────────────┘
+      convert in place        QAT fine-tune           bake + save
+```
+
+| | Path | What happens | When to use it |
+|---|---|---|---|
+| 🔧 | **PTQ** | Round already-trained weights to ternary in one shot | Quick experiments, disk compression, tool evaluation |
+| 🏋️ | **QAT** | Train the model *with* ternary rounding inside the forward pass | Production models — weights learn to survive rounding |
 
 ---
 
@@ -161,39 +188,19 @@ trainer.bake()
 
 ### PTQ: Post-training quantization
 
-```mermaid
-flowchart TD
-    A["Source model on<br/>Hugging Face Hub"] -->|"download"| B["Full model in<br/>memory (RAM/GPU)"]
-    B -->|"quantize_linear_modules()"| C["Model with ternary-valued<br/>Linear weights (same dtype/shape)"]
-    C -->|"save_pretrained()"| D["Drop-in HF checkpoint<br/>+ optional 2-bit packed sidecar"]
+Every `nn.Linear` weight is processed in one pass with absmean scaling. The
+resulting checkpoint has the **same architecture and dtype** as the source —
+only the weight *values* change. Embeddings, normalization layers, and the LM
+head are left untouched (standard practice: rounding those hurts
+disproportionately).
 
-    style B fill:#f9f,stroke:#333
-    style D fill:#9f9,stroke:#333
-```
-
-PTQ processes every `nn.Linear` weight in one pass using absmean scaling. The
-resulting checkpoint has the same architecture and dtype as the source — only the
-weight *values* change. Embeddings, normalization layers, and the LM head are
-left untouched (standard practice: rounding those hurts disproportionately).
-
-**Cost:** Minutes on CPU. **Quality:** Expect measurable degradation — a 27B run
+**Cost:** minutes on CPU. **Quality:** expect measurable degradation — a 27B run
 measured **0.53 mean relative L2 weight error** across 614 layers.
 
-Use `--pack` to also produce a genuinely 2-bit-packed sidecar for storage compression.
-Use `--dry-run` to see stats without writing anything.
+Use `--pack` to also produce a genuinely 2-bit-packed sidecar for storage
+compression. Use `--dry-run` to see stats without writing anything.
 
 ### QAT: Quantization-aware training
-
-```mermaid
-flowchart TD
-    A["Pretrained model"] -->|"convert_to_bitlinear()"| B["Model with BitLinear layers<br/>(ternary fake-quant each forward pass)"]
-    B -->|"fine-tune with STE<br/>(straight-through estimator)"| C["Trained model:<br/>weights that tolerate rounding"]
-    C -->|"bake_bitlinear_to_linear()"| D["Plain checkpoint with<br/>ternary-valued weights"]
-    D -->|"hugo-push"| E["Hugging Face Hub<br/>(with provenance card)"]
-
-    style B fill:#f9f,stroke:#333
-    style D fill:#9f9,stroke:#333
-```
 
 QAT puts ternary rounding *inside the forward pass during training*, so
 gradients push weights toward values that round well. It uses a **straight-through
@@ -201,7 +208,7 @@ estimator (STE)**: the forward pass quantizes (which has zero true gradient), bu
 the backward pass pretends quantization was the identity function. Standard
 optimizers work unmodified.
 
-**Cost:** GPU-days for a 27B+ model. **Quality:** The point of this project —
+**Cost:** GPU-days for a 27B+ model. **Quality:** the point of this project —
 weights that were *trained* ternary rather than rounded after the fact.
 
 See [`docs/qat.md`](docs/qat.md) for the full QAT workflow and
@@ -225,9 +232,9 @@ memory breakdown for representative model sizes:
 | 27B | 27 × 10⁹ | 54 GB | 54 GB | 216 GB | **~324 GB** | 4× A100 or 4× H100; or 8× A100 with FSDP |
 | 70B | 70 × 10⁹ | 140 GB | 140 GB | 560 GB | **~840 GB** | 8× H100 (80 GB) minimum; FSDP/DeepSpeed required |
 
-> **Note:** The current `hugo-train-qat` script does single-process training with
-> gradient accumulation — it does not implement FSDP/DeepSpeed sharding. For
-> multi-GPU work, either wrap it with your existing distributed setup or use
+> **Note:** the current `hugo-train-qat` script does single-process training
+> with gradient accumulation — it does not implement FSDP/DeepSpeed sharding.
+> For multi-GPU work, either wrap it with your existing distributed setup or use
 > `hugo.qat.convert_to_bitlinear` inside a training harness you already trust.
 
 #### Activations add more
@@ -309,6 +316,7 @@ See `--help` on each command, [`docs/usage.md`](docs/usage.md), and
 src/hugo/
 ├── __init__.py              # Public API: quantize, qat, streaming, pack/unpack
 ├── quantize.py              # Core math: absmean scaling, ternary rounding, 2-bit pack/unpack
+├── pure.py                  # Pure-quantization math: hashing, Merkle roots, pack helpers
 ├── qat.py                   # STE, BitLinear layer, convert/bake helpers for QAT training
 ├── ternarize.py             # CLI: PTQ for models that fit in RAM (hugo-ternarize)
 ├── stream_ternarize.py      # CLI: PTQ for models larger than disk (hugo-stream-ternarize)
@@ -331,17 +339,17 @@ docs/
 ├── usage.md                 # PTQ CLI reference + internals
 └── compute-requirements.md  # GPU/memory/time estimates for QAT training
 
-examples/                    # Runnable shell scripts
-├── quantize_small_model.sh
-├── quantize_large_model_streaming.sh
-└── qat_train_and_publish.sh
-
 scripts/                     # Standalone dev scripts (require GPU, run from repo root)
 ├── train_smollm_qat.py      # SmolLM-135M QAT with live metrics → out/<name>/train_log.json
 ├── benchmark_ternary.py     # PPL / speed / sparsity vs fp32 baseline → out/benchmark.json
 ├── benchmark_perf.py        # Prefill / decode / TTFT / VRAM microbenchmarks → out/perf_benchmark.json
 ├── chat.py                  # Interactive chat with a ternarized checkpoint
 └── test_harness_on_qat.py   # OpenMythos harness sanity-check on a QAT'd checkpoint
+
+examples/                    # Runnable shell scripts
+├── quantize_small_model.sh
+├── quantize_large_model_streaming.sh
+└── qat_train_and_publish.sh
 
 .github/
 └── workflows/tests.yml      # CI: ruff lint + pytest on every push/PR
@@ -355,6 +363,11 @@ scripts/                     # Standalone dev scripts (require GPU, run from rep
 
 Run against `huihui-ai/Huihui-Qwen3.6-27B-abliterated` (614 linear layers):
 
+```
+   fp16    ████████████████████████████████████████████████████  45.7 GB
+   packed  ██████                                                5.7 GB
+```
+
 | Metric | Value |
 |---|---|
 | Quantized layers | 614 |
@@ -364,7 +377,6 @@ Run against `huihui-ai/Huihui-Qwen3.6-27B-abliterated` (614 linear layers):
 | Compression ratio | **8.0×** |
 | Mean relative L2 error | 0.53 |
 | Mean zero fraction | 0.31 |
-
 
 ### QAT: tiny proxy model (smoke test)
 
@@ -385,6 +397,12 @@ Run with [`scripts/train_smollm_qat.py`](scripts/train_smollm_qat.py) on
 `HuggingFaceTB/SmolLM-135M` (4,000 steps, TinyStories, batch 4, seq 256,
 lr 1e-3 → 1e-5, ~11 minutes wall-clock on an RTX 5060 Laptop):
 
+```
+   perplexity on held-out TinyStories · lower is better
+   fp32 baseline   ██████████████████████  2.05
+   QAT ternary     █████████████████▎      1.75
+```
+
 | Metric | Value |
 |---|---|
 | Training loss (start → end) | 15.56 → 1.73 |
@@ -403,8 +421,6 @@ domain (TinyStories), so the gap isn't pure quantization gain; the honest
 headline is that **quantization cost nothing** while producing a genuinely
 2-bit-representable model. Run [`scripts/benchmark_ternary.py`](scripts/benchmark_ternary.py)
 and [`scripts/benchmark_perf.py`](scripts/benchmark_perf.py) to reproduce.
-
-The CI verification tests live in [`tests/`](tests/).
 
 ---
 
