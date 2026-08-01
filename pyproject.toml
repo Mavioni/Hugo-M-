@@ -52,9 +52,9 @@ Issues = "https://github.com/Mavioni/Hugo-M-/issues"
 Changelog = "https://github.com/Mavioni/Hugo-M-/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-cov>=4", "hypothesis>=6.100", "ruff==0.6.9", "mypy>=1.0", "datasets>=2.14"]
+dev = ["pytest>=7", "pytest-cov>=4", "hypothesis>=6.100", "ruff==0.6.9", "mypy>=1.0", "datasets>=5.0.1"]
 # QAT training needs a dataset loader; PTQ-only users don't.
-train = ["datasets>=2.14"]
+train = ["datasets>=5.0.1"]
 # OpenMythos bridge for quantizing RDT models
 mythos = ["open-mythos>=0.5.0"]
 # CUDA inference kernel for packed ternary weights (Triton; Windows builds
