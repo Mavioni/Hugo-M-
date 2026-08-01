@@ -73,6 +73,7 @@ def main() -> int:
     parser.add_argument("--gen-tokens", type=int, default=128)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--graph", action="store_true", help="also measure CUDA-graph decode")
+    parser.add_argument("--fuse", action="store_true", help="fuse QKV and gate+up into single calls")
     parser.add_argument("--output", default="out/perf_kernel.json")
     args = parser.parse_args()
 
@@ -96,6 +97,7 @@ def main() -> int:
                                          args.gen_tokens, args.runs)
     print(f"  decode {tps_fp16:.1f} tok/s  peak VRAM {vram_fp16:.2f} GB")
 
+    tps_fp16_graph = None
     if args.graph:
         print("=== fp16 + CUDA graph ===")
         tps_fp16_graph, _ = bench_graph_decode(model, tok, device, args.prompt,
@@ -108,6 +110,29 @@ def main() -> int:
                                              args.gen_tokens, args.runs)
     print(f"  decode {tps_kernel:.1f} tok/s  peak VRAM {vram_kernel:.2f} GB")
 
+    n_fused = 0
+    if args.fuse:
+        from hugo.kernel.fuse import fuse_model_with_kernel
+
+        n_qkv, n_mlp = fuse_model_with_kernel(model)
+        n_fused = n_qkv + n_mlp
+        print(f"=== fused QKV/gate+up ({n_qkv} qkv, {n_mlp} mlp groups) ===")
+        if args.graph:
+            tps_fused = bench_graph_decode(model, tok, device, args.prompt,
+                                           args.gen_tokens, args.runs)
+            tps_fused = tps_fused[0]
+            print(f"  decode (CUDA graph) {tps_fused:.1f} tok/s")
+            tps_kernel_graph = tps_fused
+        else:
+            # fused projections are only consumable by the GraphDecoder
+            # (transformers' own forward still expects q_proj etc.)
+            print("  (fused decode requires --graph; skipping)")
+            tps_fused = None
+            tps_kernel_graph = None
+    else:
+        tps_fused = None
+        tps_kernel_graph = None
+
     results: dict = {
         "checkpoint": str(Path(args.checkpoint)),
         "dtype": args.dtype,
@@ -118,12 +143,13 @@ def main() -> int:
         "fp16_peak_vram_gb": round(vram_fp16, 3),
         "kernel_peak_vram_gb": round(vram_kernel, 3),
     }
-    if args.graph:
-        print("=== triton packed-ternary + CUDA graph ===")
-        tps_kernel_graph, _ = bench_graph_decode(model, tok, device, args.prompt,
-                                                 args.gen_tokens, args.runs)
-        print(f"  decode {tps_kernel_graph:.1f} tok/s")
+    if tps_fused is not None:
+        results["fused_decode_tok_s"] = round(tps_fused, 2)
+        results["fused_speedup_vs_fp16"] = round(tps_fused / tps_fp16, 3)
+        results["fused_groups"] = n_fused
+    if tps_fp16_graph is not None:
         results["fp16_graph_tok_s"] = round(tps_fp16_graph, 2)
+    if tps_kernel_graph is not None:
         results["kernel_graph_tok_s"] = round(tps_kernel_graph, 2)
         results["graph_speedup"] = round(tps_kernel_graph / tps_fp16_graph, 3)
     out = Path(args.output)

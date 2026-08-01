@@ -348,6 +348,7 @@ src/hugo/
 └── kernel/                  # Triton inference kernel for 2-bit-packed weights
     ├── __init__.py          # TernaryLinear (drop-in), sidecar loading, replace_linears_with_kernel
     ├── decode.py            # GraphDecoder: CUDA-graph decode engine (static KV buffers)
+    ├── fuse.py              # FusedTernary: QKV and gate+up in one kernel call
     └── ternary.py           # Packed-ternary GEMM + GEMV kernels, per-channel scales
 
 tests/                       # pytest suite (no network/GPU required)
@@ -478,25 +479,30 @@ on speed too, and the gap widens with model size.
 
 **Kill the launch overhead with a CUDA graph.** `GraphDecoder` captures the
 whole decode step (fixed-size KV caches + position mask, so shapes stay static
-and the step is numerically identical) and replays it per token:
+and the step is numerically identical) and replays it per token. Fuse the
+shared-input projections too — q/k/v and gate/up each get one kernel call
+instead of three (`fuse_model_with_kernel`), which also multiplies the GEMV
+kernel's parallelism:
 
 ```python
 from hugo.kernel.decode import GraphDecoder
+from hugo.kernel.fuse import fuse_model_with_kernel
 
-dec = GraphDecoder(model, max_len=512)   # works with nn.Linear *and* TernaryLinear
+fuse_model_with_kernel(model)                  # QKV + gate/up, one call each
+dec = GraphDecoder(model, max_len=512)         # works with nn.Linear *and* TernaryLinear
 tokens = dec.generate(prompt_ids, max_new_tokens=128)
 ```
 
 Same machine, in-graph decode:
 
-| Model | fp16 + graph | kernel + graph | Speed |
+| Model | fp16 + graph | kernel + graph (fused) | Speed |
 |---|---|---|---|
-| Qwen2.5-0.5B (PTQ) | 208 tok/s | 205 tok/s | 0.98× |
-| SmolLM2-1.7B (PTQ) | 80 tok/s | **94 tok/s** | **1.18×** |
+| Qwen2.5-0.5B (PTQ) | 208 tok/s | **233 tok/s** | **1.12×** |
+| SmolLM2-1.7B (PTQ) | 80 tok/s | **104 tok/s** | **1.30×** |
 
 Graphs remove the per-call launch cost for *both* paths (fp16 triples from
 52 → 208 tok/s at 0.5B), and with the overhead gone the kernel's bandwidth
-advantage shows: **1.18× faster than cuBLAS at 1.7B**.
+advantage shows — fusion then pushes it past cuBLAS at every scale measured.
 
 Kernel requirements: channel granularity, CUDA + Triton (falls back to an
 exact torch reference elsewhere), activations fp16/bf16.

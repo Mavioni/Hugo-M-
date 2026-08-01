@@ -208,3 +208,83 @@ def test_graph_decoder_matches_eager() -> None:
         graph.append(dec.input_ids.item())
 
     assert eager == graph
+
+
+@pytest.mark.skipif(not CUDA_OK, reason="requires CUDA + triton")
+def test_fused_ternary_matches_individual() -> None:
+    from hugo.kernel.fuse import FusedTernary
+
+    torch.manual_seed(3)
+    linears = []
+    for width in (24, 8, 8):  # q/k/v widths
+        linear = nn.Linear(16, width, bias=True).half().cuda()
+        codes = make_codes(width, 16)
+        tl = TernaryLinear.from_linear(linear, codes, torch.rand(width, 1) + 0.5).cuda()
+        linears.append(tl)
+    fused = FusedTernary(linears, [ln.out_features for ln in linears], 16)
+    assert fused.out_features == 40
+    x = torch.randn(5, 16, device="cuda", dtype=torch.float16)
+    outs = fused(x)
+    assert len(outs) == 3
+    for got, tl in zip(outs, linears, strict=True):
+        assert torch.allclose(got.float(), tl(x).float(), atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not CUDA_OK, reason="requires CUDA + triton")
+def test_fused_decoder_graph_matches_eager(tmp_path) -> None:
+    import json as jsonlib
+
+    from safetensors.torch import save_file
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from hugo.kernel.decode import GraphDecoder
+    from hugo.kernel.fuse import fuse_model_with_kernel
+    from hugo.quantize import quantize_linear_modules
+    from hugo.ternarize import build_packed_sidecar
+
+    torch.manual_seed(4)
+    cfg = LlamaConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=128,
+    )
+    model = LlamaForCausalLM(cfg)
+    _, quantized = quantize_linear_modules(model, granularity="channel")
+    packed_tensors, manifest = build_packed_sidecar(model, quantized, "channel", None)
+    pack_dir = tmp_path / "ternary_packed"
+    pack_dir.mkdir()
+    (pack_dir / "manifest.json").write_text(jsonlib.dumps(manifest))
+    save_file(packed_tensors, str(pack_dir / "packed.safetensors"))
+
+    from hugo.kernel import replace_linears_with_kernel
+
+    model = model.half().cuda()
+    replace_linears_with_kernel(model, pack_dir)
+    n_qkv, n_mlp = fuse_model_with_kernel(model)
+    assert n_qkv == 2 and n_mlp == 2
+    assert not hasattr(model.model.layers[0].self_attn, "q_proj")
+    assert hasattr(model.model.layers[0].self_attn, "qkv")
+
+    dec = GraphDecoder(model, max_len=48)
+    dec._reset()
+    dec.input_ids.copy_(torch.tensor([9], device="cuda"))
+    eager = []
+    for _ in range(32):
+        dec._step()
+        eager.append(dec.input_ids.item())
+
+    dec._reset()
+    dec.input_ids.copy_(torch.tensor([9], device="cuda"))
+    dec.capture()
+    dec._reset()
+    dec.input_ids.copy_(torch.tensor([9], device="cuda"))
+    graph = []
+    for _ in range(32):
+        dec.graph.replay()
+        graph.append(dec.input_ids.item())
+
+    assert eager == graph

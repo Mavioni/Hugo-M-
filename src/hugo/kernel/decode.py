@@ -63,9 +63,16 @@ class GraphDecoder:
             attn = layer.self_attn
             h2 = layer.input_layernorm(h)
 
-            q = attn.q_proj(h2).view(1, self.q_heads, self.head_dim)
-            k = attn.k_proj(h2).view(1, self.kv_heads, self.head_dim)
-            v = attn.v_proj(h2).view(1, self.kv_heads, self.head_dim)
+            qkv = getattr(attn, "qkv", None)
+            if qkv is not None:
+                q, k, v = qkv(h2)
+            else:
+                q = attn.q_proj(h2)
+                k = attn.k_proj(h2)
+                v = attn.v_proj(h2)
+            q = q.view(1, self.q_heads, self.head_dim)
+            k = k.view(1, self.kv_heads, self.head_dim)
+            v = v.view(1, self.kv_heads, self.head_dim)
             self.k_cache[li][:, :, pos, :] = k.unsqueeze(2)
             self.v_cache[li][:, :, pos, :] = v.unsqueeze(2)
 
@@ -81,8 +88,13 @@ class GraphDecoder:
             h = h + attn.o_proj(attn_out)
 
             h3 = layer.post_attention_layernorm(h)
-            gate = torch.nn.functional.silu(layer.mlp.gate_proj(h3))
-            h = h + layer.mlp.down_proj(gate * layer.mlp.up_proj(h3))
+            gate_up = getattr(layer.mlp, "gate_up", None)
+            if gate_up is not None:
+                gate, up = gate_up(h3)
+                h = h + layer.mlp.down_proj(torch.nn.functional.silu(gate) * up)
+            else:
+                gate = torch.nn.functional.silu(layer.mlp.gate_proj(h3))
+                h = h + layer.mlp.down_proj(gate * layer.mlp.up_proj(h3))
 
         logits = self.lm_head(self.norm(h))  # [1, V]
         self.input_ids.copy_(torch.argmax(logits, dim=-1))
