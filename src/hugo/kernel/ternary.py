@@ -13,10 +13,26 @@ so the inner loop is a pure add/subtract dot product over codes {-1, 0, +1}.
 from __future__ import annotations
 
 import torch
-import triton
-import triton.language as tl
 
 from hugo.pure import unpack_ternary_2bit
+
+try:
+    import triton
+    import triton.language as tl
+
+    HAS_TRITON = True
+except ImportError:
+    triton = None
+    tl = None
+    HAS_TRITON = False
+
+
+def _jit(fn):
+    """No-op decorator when triton is not installed (kernel extra)."""
+    return fn
+
+
+_jit = triton.jit if HAS_TRITON else _jit
 
 _BLOCK_M = 64
 _BLOCK_N = 64
@@ -26,7 +42,7 @@ _GEMV_BLOCK_N = 64
 _GEMV_BLOCK_K = 128
 
 
-@triton.jit
+@_jit
 def _ternary_gemv_kernel(
     x_ptr,
     packed_ptr,
@@ -94,7 +110,7 @@ def _ternary_gemv(x: torch.Tensor, packed: torch.Tensor, scale: torch.Tensor) ->
     return y
 
 
-@triton.jit
+@_jit
 def _ternary_gemm_kernel(
     x_ptr,
     packed_ptr,
@@ -177,6 +193,11 @@ def ternary_matmul(
         raise ValueError(f"expected 2D activations, got shape {tuple(x.shape)}")
     if not x.is_cuda:
         return _reference(x, packed, scale, out_channels, in_features)
+    if not HAS_TRITON:
+        raise RuntimeError(
+            "CUDA packed-ternary matmul requires triton; install it with "
+            "`pip install hugo[kernel]` (or triton-windows on Windows)"
+        )
     if x.dtype not in (torch.float16, torch.bfloat16):
         raise ValueError(f"kernel supports fp16/bf16 activations, got {x.dtype}")
 
