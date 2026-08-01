@@ -57,6 +57,12 @@ dev = ["pytest>=7", "pytest-cov>=4", "hypothesis>=6.100", "ruff==0.6.9", "mypy>=
 train = ["datasets>=2.14"]
 # OpenMythos bridge for quantizing RDT models
 mythos = ["open-mythos>=0.5.0"]
+# CUDA inference kernel for packed ternary weights (Triton; Windows builds
+# ship as triton-windows)
+kernel = [
+    "triton>=3.2; platform_system != 'Windows'",
+    "triton-windows>=3.2; platform_system == 'Windows'",
+]
 
 [project.scripts]
 hugo-ternarize = "hugo.ternarize:main"

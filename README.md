@@ -72,6 +72,7 @@ values back to the right magnitude.
 - [CLI reference](#cli-reference)
 - [Repository structure](#repository-structure)
 - [Benchmarks](#benchmarks) — measured numbers, not vibes
+- [Inference kernel](#inference-kernel) — run the 2-bit weights as-is
 - [Caveats](#caveats) — read before you commit to this
 - [Contributing](#contributing) · [License](#license)
 
@@ -125,6 +126,24 @@ hugo-ternarize \
 
 # Verify: the packed sidecar is ~8× smaller than fp16
 ls -lh ./out/tiny-ternary/ternary_packed/
+```
+
+### Run it with the CUDA inference kernel
+
+```bash
+pip install -e ".[kernel]"          # Triton (or triton-windows on Windows)
+```
+
+```python
+from transformers import AutoModelForCausalLM
+from hugo.kernel import replace_linears_with_kernel
+
+model = AutoModelForCausalLM.from_pretrained(
+    "./out/tiny-ternary", torch_dtype=torch.float16
+).to("cuda")
+
+replaced = replace_linears_with_kernel(model, "./out/tiny-ternary/ternary_packed")
+# weights now live as 2-bit codes in GPU memory; forward runs the Triton kernel
 ```
 
 ### QAT training smoke test (GPU recommended, ~2 minutes)
@@ -325,7 +344,10 @@ src/hugo/
 ├── reconstruct.py           # CLI: rebuild full checkpoint from streaming output
 ├── load_packed.py           # Utility: load individual layer weights from packed sidecar
 ├── openmythos.py            # Bridge: PTQ/QAT for OpenMythos RDT checkpoints
-└── push_to_hub.py           # CLI: publish checkpoint to HF Hub with auto-generated model card
+├── push_to_hub.py           # CLI: publish checkpoint to HF Hub with auto-generated model card
+└── kernel/                  # Triton inference kernel for 2-bit-packed weights
+    ├── __init__.py          # TernaryLinear (drop-in), sidecar loading, replace_linears_with_kernel
+    └── ternary.py           # Packed-ternary GEMM + GEMV kernels, per-channel scales
 
 tests/                       # pytest suite (no network/GPU required)
 ├── test_quantize.py         # Core math: ternarize, dequantize, pack/unpack round-trip
@@ -343,6 +365,7 @@ scripts/                     # Standalone dev scripts (require GPU, run from rep
 ├── train_smollm_qat.py      # SmolLM-135M QAT with live metrics → out/<name>/train_log.json
 ├── benchmark_ternary.py     # PPL / speed / sparsity vs fp32 baseline → out/benchmark.json
 ├── benchmark_perf.py        # Prefill / decode / TTFT / VRAM microbenchmarks → out/perf_benchmark.json
+├── benchmark_kernel.py      # Kernel vs fp16 decode speed + VRAM → out/perf_kernel.json
 ├── chat.py                  # Interactive chat with a ternarized checkpoint
 └── test_harness_on_qat.py   # OpenMythos harness sanity-check on a QAT'd checkpoint
 
@@ -424,6 +447,48 @@ and [`scripts/benchmark_perf.py`](scripts/benchmark_perf.py) to reproduce.
 
 ---
 
+## Inference kernel
+
+The packed sidecar is not just for storage — a [Triton](https://triton-lang.org)
+kernel in `src/hugo/kernel/` consumes it **directly in GPU memory**, skipping
+the fp16 materialization entirely. Decode (one token at a time) is
+weight-bandwidth-bound, which is exactly where 2-bit weights pay off: the
+kernel streams 1/8 the bytes and accumulates in fp32.
+
+```
+   weights in fp16            weights as 2-bit codes
+   ┌────────────────┐         ┌──────────────────────┐
+   │  896 × 896 fp16 │   ──▸   │  896 × 224 u8 codes  │
+   │  (1.6 MB)       │         │  + 896 fp32 scales   │
+   └────────────────┘         └──────────────────────┘
+```
+
+Measured on an RTX 5060 Laptop (8 GB), autoregressive decode, 128 tokens:
+
+| Model | fp16 decode | kernel decode | Speed | Peak VRAM |
+|---|---|---|---|---|
+| Qwen2.5-0.5B (PTQ) | 51.0 tok/s | 45.5 tok/s | 0.89× | 1.01 GB → **0.38 GB** |
+| SmolLM2-1.7B (PTQ) | 58.0 tok/s | **63.1 tok/s** | **1.09×** | 3.46 GB → **0.64 GB** |
+
+The honest read: below ~1B the model is latency-bound and cuBLAS fp16 is hard
+to beat — the kernel still wins big on memory (2.7×/5.4× less VRAM). Above
+~1B, where every token streams gigabytes of weights, the kernel starts winning
+on speed too, and the gap widens with model size. Kernel requirements:
+channel granularity, CUDA + Triton (falls back to an exact torch reference
+elsewhere), activations fp16/bf16.
+
+```python
+from hugo.kernel import TernaryLinear, replace_linears_with_kernel
+
+replace_linears_with_kernel(model, "out/tiny-ternary/ternary_packed")  # swap in place
+# or build a layer directly from quantize output:
+# TernaryLinear.from_linear(linear, codes, scale)
+```
+
+Run [`scripts/benchmark_kernel.py`](scripts/benchmark_kernel.py) to reproduce.
+
+---
+
 ## Caveats
 
 - **PTQ costs accuracy.** Rounding weights that were never trained to survive
@@ -433,11 +498,11 @@ and [`scripts/benchmark_perf.py`](scripts/benchmark_perf.py) to reproduce.
   datacenter hardware. See [Compute requirements](#compute-requirements).
 - **Ternary values, ordinary storage.** Checkpoints store ternary values as
   regular fp16/bf16 numbers — they aren't smaller or faster without a ternary-aware
-  runtime (e.g., [bitnet.cpp](https://github.com/microsoft/BitNet)). Use `--pack`
-  for the genuine 2-bit storage compression.
-- **No inference speedup out of the box.** The drop-in checkpoint loads and runs on
-  any Hugging Face stack, but you need custom kernels to get the ~8× memory reduction
-  and potential speedup at inference time.
+  runtime. Use `--pack` for the genuine 2-bit storage compression, and the
+  [inference kernel](#inference-kernel) to run packed weights directly.
+- **No inference speedup at small scale.** The kernel needs the model to be
+  weight-bandwidth-bound to beat cuBLAS — below ~1B it's a memory win, not a
+  speed win. Expect the speed gap to grow with model size.
 
 ---
 
