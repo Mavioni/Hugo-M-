@@ -168,3 +168,43 @@ def test_replace_linears_with_kernel(tmp_path) -> None:
 
     assert y_kernel.shape == y_ref.shape
     assert torch.allclose(y_kernel.float(), y_ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not CUDA_OK, reason="requires CUDA + triton")
+def test_graph_decoder_matches_eager() -> None:
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from hugo.kernel.decode import GraphDecoder
+
+    cfg = LlamaConfig(
+        vocab_size=64,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=128,
+    )
+    model = LlamaForCausalLM(cfg).half().cuda().eval()
+    dec = GraphDecoder(model, max_len=48)
+
+    # eager path: exactly the engine's own _step
+    dec._reset()
+    dec.input_ids.copy_(torch.tensor([7], device="cuda"))
+    eager = []
+    for _ in range(32):
+        dec._step()
+        eager.append(dec.input_ids.item())
+
+    # graph path: same code, captured and replayed
+    dec._reset()
+    dec.input_ids.copy_(torch.tensor([7], device="cuda"))
+    dec.capture()
+    dec._reset()  # capture consumed one step; start replay from pos 0
+    dec.input_ids.copy_(torch.tensor([7], device="cuda"))
+    graph = []
+    for _ in range(32):
+        dec.graph.replay()
+        graph.append(dec.input_ids.item())
+
+    assert eager == graph

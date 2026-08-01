@@ -347,6 +347,7 @@ src/hugo/
 ├── push_to_hub.py           # CLI: publish checkpoint to HF Hub with auto-generated model card
 └── kernel/                  # Triton inference kernel for 2-bit-packed weights
     ├── __init__.py          # TernaryLinear (drop-in), sidecar loading, replace_linears_with_kernel
+    ├── decode.py            # GraphDecoder: CUDA-graph decode engine (static KV buffers)
     └── ternary.py           # Packed-ternary GEMM + GEMV kernels, per-channel scales
 
 tests/                       # pytest suite (no network/GPU required)
@@ -473,9 +474,32 @@ Measured on an RTX 5060 Laptop (8 GB), autoregressive decode, 128 tokens:
 The honest read: below ~1B the model is latency-bound and cuBLAS fp16 is hard
 to beat — the kernel still wins big on memory (2.7×/5.4× less VRAM). Above
 ~1B, where every token streams gigabytes of weights, the kernel starts winning
-on speed too, and the gap widens with model size. Kernel requirements:
-channel granularity, CUDA + Triton (falls back to an exact torch reference
-elsewhere), activations fp16/bf16.
+on speed too, and the gap widens with model size.
+
+**Kill the launch overhead with a CUDA graph.** `GraphDecoder` captures the
+whole decode step (fixed-size KV caches + position mask, so shapes stay static
+and the step is numerically identical) and replays it per token:
+
+```python
+from hugo.kernel.decode import GraphDecoder
+
+dec = GraphDecoder(model, max_len=512)   # works with nn.Linear *and* TernaryLinear
+tokens = dec.generate(prompt_ids, max_new_tokens=128)
+```
+
+Same machine, in-graph decode:
+
+| Model | fp16 + graph | kernel + graph | Speed |
+|---|---|---|---|
+| Qwen2.5-0.5B (PTQ) | 208 tok/s | 205 tok/s | 0.98× |
+| SmolLM2-1.7B (PTQ) | 80 tok/s | **94 tok/s** | **1.18×** |
+
+Graphs remove the per-call launch cost for *both* paths (fp16 triples from
+52 → 208 tok/s at 0.5B), and with the overhead gone the kernel's bandwidth
+advantage shows: **1.18× faster than cuBLAS at 1.7B**.
+
+Kernel requirements: channel granularity, CUDA + Triton (falls back to an
+exact torch reference elsewhere), activations fp16/bf16.
 
 ```python
 from hugo.kernel import TernaryLinear, replace_linears_with_kernel
@@ -485,7 +509,8 @@ replace_linears_with_kernel(model, "out/tiny-ternary/ternary_packed")  # swap in
 # TernaryLinear.from_linear(linear, codes, scale)
 ```
 
-Run [`scripts/benchmark_kernel.py`](scripts/benchmark_kernel.py) to reproduce.
+Run [`scripts/benchmark_kernel.py`](scripts/benchmark_kernel.py) (add
+`--graph` for the CUDA-graph numbers) to reproduce.
 
 ---
 
@@ -502,7 +527,8 @@ Run [`scripts/benchmark_kernel.py`](scripts/benchmark_kernel.py) to reproduce.
   [inference kernel](#inference-kernel) to run packed weights directly.
 - **No inference speedup at small scale.** The kernel needs the model to be
   weight-bandwidth-bound to beat cuBLAS — below ~1B it's a memory win, not a
-  speed win. Expect the speed gap to grow with model size.
+  speed win (0.98× even in a CUDA graph). The speed gap widens with model
+  size: 1.18× at 1.7B in-graph, and more beyond.
 
 ---
 
