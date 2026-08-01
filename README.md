@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://github.com/Mavioni/Hugo-M-/actions/workflows/tests.yml"><img src="https://github.com/Mavioni/Hugo-M-/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="license"></a>
-  <a href="https://pypi.org/project/hugo/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="python"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="python">
   <img src="https://img.shields.io/badge/bitwidth-1.58--bit-8A2BE2.svg" alt="1.58-bit">
   <img src="https://img.shields.io/badge/storage-8%C3%97%20smaller-00C853.svg" alt="8x smaller">
 </p>
@@ -401,7 +401,7 @@ Run against `huihui-ai/Huihui-Qwen3.6-27B-abliterated` (614 linear layers):
 | Quantized layers | 614 |
 | Weight elements | 22,833,741,824 |
 | fp16-equivalent size | 45.67 GB |
-| Packed size (2-bit + scales) | 5.71 GB |
+| Packed size (2-bit codes) | 5.71 GB |
 | Compression ratio | **8.0×** |
 | Mean relative L2 error | 0.53 |
 | Mean zero fraction | 0.31 |
