@@ -56,8 +56,9 @@ values back to the right magnitude.
 > `channel` (one scale per output row, the default), and `group` (one scale per
 > N input elements, lowest error, more metadata). Hugo also genuinely compresses
 > codes to **2 bits each** via `--pack` (4 codes per byte), so a 45.7 GB fp16
-> model becomes a **5.7 GB** packed sidecar. Realizing the speedup needs a
-> ternary-aware runtime like [bitnet.cpp](https://github.com/microsoft/BitNet).
+> model becomes a **5.7 GB** packed sidecar — and its own [Triton inference
+> kernel](#inference-kernel) can run those packed weights directly on a GPU,
+> no external runtime required.
 
 ---
 
@@ -139,7 +140,7 @@ from transformers import AutoModelForCausalLM
 from hugo.kernel import replace_linears_with_kernel
 
 model = AutoModelForCausalLM.from_pretrained(
-    "./out/tiny-ternary", torch_dtype=torch.float16
+    "./out/tiny-ternary", dtype=torch.float16
 ).to("cuda")
 
 replaced = replace_linears_with_kernel(model, "./out/tiny-ternary/ternary_packed")
@@ -353,9 +354,11 @@ src/hugo/
 
 tests/                       # pytest suite (no network/GPU required)
 ├── test_quantize.py         # Core math: ternarize, dequantize, pack/unpack round-trip
+├── test_pure.py             # Hypothesis property tests on the pure quantization math
 ├── test_qat.py              # STE gradient correctness, BitLinear conversion, bake
 ├── test_streaming.py        # Shard processing, weight map resolution, resume logic
 ├── test_reconstruct.py      # Round-trip: quantize → reconstruct → verify
+├── test_kernel.py           # Kernel equivalence, fallbacks, graph-vs-eager (GPU-gated)
 └── test_push_to_hub.py      # Model card generation, token resolution
 
 docs/
@@ -465,6 +468,14 @@ kernel streams 1/8 the bytes and accumulates in fp32.
    └────────────────┘         └──────────────────────┘
 ```
 
+```python
+from hugo.kernel import TernaryLinear, replace_linears_with_kernel
+
+replaced = replace_linears_with_kernel(model, "./out/tiny-ternary/ternary_packed")
+# weights now live as 2-bit codes in GPU memory; forward runs the Triton kernel
+# (or build a layer directly from quantize output: TernaryLinear.from_linear(...))
+```
+
 Measured on an RTX 5060 Laptop (8 GB), autoregressive decode, 128 tokens:
 
 | Model | fp16 decode | kernel decode | Speed | Peak VRAM |
@@ -507,16 +518,9 @@ advantage shows — fusion then pushes it past cuBLAS at every scale measured.
 Kernel requirements: channel granularity, CUDA + Triton (falls back to an
 exact torch reference elsewhere), activations fp16/bf16.
 
-```python
-from hugo.kernel import TernaryLinear, replace_linears_with_kernel
-
-replace_linears_with_kernel(model, "out/tiny-ternary/ternary_packed")  # swap in place
-# or build a layer directly from quantize output:
-# TernaryLinear.from_linear(linear, codes, scale)
-```
-
-Run [`scripts/benchmark_kernel.py`](scripts/benchmark_kernel.py) (add
-`--graph` for the CUDA-graph numbers) to reproduce.
+Run [`scripts/benchmark_kernel.py`](scripts/benchmark_kernel.py) — add
+`--graph` for the CUDA-graph numbers and `--fuse` for the fused QKV/gate+up
+path — to reproduce.
 
 ---
 
@@ -532,9 +536,10 @@ Run [`scripts/benchmark_kernel.py`](scripts/benchmark_kernel.py) (add
   runtime. Use `--pack` for the genuine 2-bit storage compression, and the
   [inference kernel](#inference-kernel) to run packed weights directly.
 - **No inference speedup at small scale.** The kernel needs the model to be
-  weight-bandwidth-bound to beat cuBLAS — below ~1B it's a memory win, not a
-  speed win (0.98× even in a CUDA graph). The speed gap widens with model
-  size: 1.18× at 1.7B in-graph, and more beyond.
+  weight-bandwidth-bound to beat cuBLAS — run naively (no CUDA graph, no
+  fusion) it's a memory win first: 0.89× speed at 0.5B, 1.09× at 1.7B, with
+  2.7×/5.4× less VRAM. With the [graph + fused decode](#inference-kernel)
+  path it beats cuBLAS at every scale measured: 1.12× at 0.5B, 1.30× at 1.7B.
 
 ---
 
